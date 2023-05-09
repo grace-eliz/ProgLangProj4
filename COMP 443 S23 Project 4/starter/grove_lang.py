@@ -30,12 +30,14 @@ class Command(object):
         # a command must be either a statement or an expression
         try:
             # first try to parse the command as a statement
-            return Statement.parse(tokens)
+            stmt = Statement.parse(tokens)
+            return stmt
         except GroveParseException as e:
             if verbose: print(e)
         try:
             # if it is not a statement, try an expression
-            return Expression.parse(tokens)
+            expr = Expression.parse(tokens)
+            return expr
         except GroveParseException as e:
             if verbose: print(e)
         raise GroveParseException(f"Unrecognized Command: {s}")
@@ -45,7 +47,7 @@ class Expression(Command):
     @abstractmethod
     def __init__(self): pass
     @abstractmethod
-    def eval(self) -> int: pass
+    def eval(self) -> object: pass
     @classmethod
     def parse(cls, tokens: list[str]) -> Expression:
         """Factory method for creating Expression subclasses from tokens"""
@@ -143,29 +145,62 @@ class StringLiteral(Expression):
         return StringLiteral(str(tokens[0]))
 
 class Object(Expression):
-    pass
+    def __init__(self, names: list[Name]):
+        self.names = names
+    def eval(self):
+        try:
+            objectModule = globals()[self.names[0].name]
+        except KeyError:
+            raise GroveEvalException(f"{self.names[0].name} has not been imported yet.")
+        names = [n.name for n in self.names[1:]]
+        for n in names:
+            if (not n in dir(objectModule)):
+                raise GroveEvalException(f"{n} in {'.'.join(names)} has not been imported yet.")
+            objectModule = getattr(objectModule, n)
+        if (type(objectModule) != type):
+            raise GroveEvalException(f"{'.'.join(names)} is not a type")
+        try:
+            return objectModule()
+        except Exception as e:
+            raise GroveEvalException(f"could not initiate {'.'.join(names)}.\n{e}.")
+    @staticmethod
+    def parse(tokens: list[str]):
+        if (len(tokens) != 2):
+            raise GroveParseException(f"{' '.join(tokens)} does not contain the correct number of tokens for an object.")
+        if (tokens[0] != 'new'):
+            raise GroveParseException("An object must begin with 'new'.")
+        nameStrings = filter(lambda x: len(x) > 0, tokens[1].split('.'))
+        if len(nameStrings) < 1:
+            raise GroveParseException(f"{tokens[1]} must contain at least one name")
+        try:
+            names = [Name.parse(ns) for ns in nameStrings]
+        except GroveParseException:
+            raise GroveParseException(f"{tokens[1]} must be a list of names separated by '.'")
+        return Object(names)
   
 class Call(Expression):
-    def __init__(self, object: Name, method: Name, expr: list[Expression]):
-        self.object = object
-        self.method = method
-        self.expr = expr
+    def __init__(self, obj: Name, met: Name, expr: list[Expression]):
+        self.obj: Name = obj
+        self.met: Name = met
+        self.expr: list[Expression] = expr
     def eval(self):
-        if self.object not in context:
-            raise GroveEvalException(f"Specified object {self.object} does not exist")
-        object = context[self.object.name]
-        if (not any(mn == self.method.name for mn in dir(object))):
-            raise GroveEvalException(f"The object {self.object.name} does not have a method named {self.method.name}")
+        if self.obj.name not in context:
+            raise GroveEvalException(f"Specified object {self.obj} does not exist")
+        obj = context[self.obj.name]
+        if (not any(mn == self.met.name for mn in dir(obj))):
+            raise GroveEvalException(f"The object {self.obj.name} does not have a method named {self.met.name}.")
+        if (not callable(getattr(obj, self.met.name))):
+            raise GroveEvalException(f"The object {self.obj.name}'s attribute {self.met.name} is not callable.")
         values = [e.eval() for e in self.expr]
         try:
-            res = getattr(object, self.method.name)(*values)
+            res = getattr(obj, self.met.name)(*values)
         except TypeError as e:
-            raise GroveEvalException(f"The object {self.object.name}'s method {self.method.name} was called incorrectly.\n{e}")
+            raise GroveEvalException(f"The object {self.obj.name}'s method {self.met.name} was called incorrectly.\n{e}")
         except Exception as e:
-            raise GroveEvalException(f"An error occured while evaluating {self.object.name}'s method {self.method.name}.\n{e}")
+            raise GroveEvalException(f"An error occured while evaluating {self.obj.name}'s method {self.met.name}.\n{e}")
         return res
-    @classmethod
-    def parse(cls, tokens: list[str]) -> Expression:
+    @staticmethod
+    def parse(tokens: list[str]) -> Expression:
         if (len(tokens) < 5):
             raise GroveParseException(f"{' '.join(tokens)} does not have enough tokens for a call statement.")
         if (tokens[0] != 'call'):
@@ -184,19 +219,11 @@ class Call(Expression):
         expr: list[Expression] = list()
         start = 4
         for i in [i + start + 1 for i in range(closingparens - start)]:
-            hasstatement = False
             try:
-                Statement.parse(tokens[start:i])
-                hasstatement = True
+                expr.append(Expression.parse(tokens[start:i]))
+                start = i
             except GroveParseException:
-                try:
-                    expr.append(Expression.parse(tokens[start:i]))
-                    start = i + 1
-                except GroveParseException:
-                    continue
-            if hasstatement:
-                raise GroveParseException(f"Attempted to pass a statement {' '.join(tokens[start:i])} as an expression.")
-            
+                continue
         return Call(obj, met, expr)
         
 class Addition(Expression):
@@ -209,7 +236,7 @@ class Name(Expression):
         self.name = name
     def eval(self) -> object:
         try: return context[self.name]
-        except KeyError: raise GroveParseException(f"{self.name} is undefined")
+        except KeyError: raise GroveEvalException(f"{self.name} is undefined")
     def __eq__(self, other: Any) -> bool:
         return isinstance(other, Name) and self.name == other.name
     @staticmethod
@@ -225,7 +252,7 @@ class Name(Expression):
             raise GroveParseException(f"Name {tokens[0]} is a reserved word")
         return Name(tokens[0])
 
-class Assignment(Expression):
+class Assignment(Statement):
     def __init__(self, name: Name, value: Expression):
         self.name = name
         self.value = value
@@ -262,9 +289,39 @@ class Assignment(Expression):
         # if this point is reached, this is a valid Set statement
         return Assignment(name, value)
 
-class Import(Expression):
-    # TODO: Implement node for "import" statements
-    pass
+class Import(Statement):
+    def __init__(self, names: list[Name]):
+        self.names  = names
+    def eval(self) -> None:
+        nameString = '.'.join([name.name for name in self.names])
+        if nameString not in context:
+            try:
+                module = importlib.import_module(nameString)
+            except:
+                raise GroveEvalException("Module could not be imported")
+        context[nameString] = module
+    def __eq__(self, other: Any):
+        return (isinstance(other, Import) and self.names == other.names)
+    def parse(tokens: list[str]) -> Import:
+        if len(tokens) < 2:
+            raise GroveParseException("Not enough tokens for Import Statement")
+        if tokens[0] != "import":
+            raise GroveParseException("Import statements must begin with \"import\"")
+        names: list[Name] = []
+        try:
+            names.append(Name.parse(tokens[1]))
+        except:
+            raise GroveParseException(f"{tokens[1]} is not a valid Name")
+        i = 2
+        while(i < len(tokens)):
+            if tokens[i] != '.':
+                raise GroveParseException("Invalid format for Import Statement")
+            try:
+                names.append(Name.parse(tokens[i+1]))
+            except:
+                raise GroveParseException(f"{tokens[i+1]} is not a valid Name")
+            i += 2
+        return Import(names)    
 
 class Terminate(Statement):
     def __init__(self):
